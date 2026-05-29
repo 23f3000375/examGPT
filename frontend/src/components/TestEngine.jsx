@@ -257,7 +257,62 @@ function TestEngine({ testConfig, onBack }) {
         )}
       </div>
 
-      {error && (
+      {error && !loading && questions.length === 0 ? (
+        <div className="flex flex-col items-center justify-center rounded-xl border border-red-500/20 bg-red-500/5 py-16 space-y-6">
+          <div className="p-4 bg-red-500/10 rounded-full border border-red-500/20">
+            <AlertTriangle className="h-10 w-10 text-red-400" />
+          </div>
+          <div className="text-center max-w-lg px-4">
+            <h2 className="text-xl font-bold text-white mb-2">Generation Failed</h2>
+            <p className="text-gray-400 text-sm leading-relaxed">
+              {error}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={onBack}
+              className="inline-flex items-center gap-2 rounded-xl border border-gray-700 bg-gray-800 px-5 py-3 text-sm font-semibold text-gray-300 transition hover:bg-gray-700 hover:text-white"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              Change Topic
+            </button>
+            <button
+              onClick={() => {
+                setError(null);
+                setLoading(true);
+                const retryGenerate = async () => {
+                  try {
+                    const { data } = await axios.post(
+                      `${API_BASE}/api/generate-question`,
+                      { topic, sub_topic: subTopic, difficulty }
+                    );
+                    setQuestions(data);
+                    setCurrentIndex(0);
+                    setScore(0);
+                    startTimeRef.current = Date.now();
+                  } catch (err) {
+                    console.error("Retry failed:", err);
+                    let errMsg = err.response?.data?.detail;
+                    if (Array.isArray(errMsg)) {
+                      errMsg = errMsg.map((e) => `${e.loc?.at(-1) || 'Field'}: ${e.msg}`).join(", ");
+                    } else if (typeof errMsg === "object") {
+                      errMsg = JSON.stringify(errMsg);
+                    }
+                    setError(errMsg || "Failed to generate questions. Please try again.");
+                  } finally {
+                    setLoading(false);
+                  }
+                };
+                retryGenerate();
+              }}
+              className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-600/25 transition hover:bg-violet-500 active:scale-[0.98]"
+            >
+              <RotateCcw className="h-4 w-4" />
+              Try Again
+            </button>
+          </div>
+        </div>
+      ) : error && (
         <div className="flex items-center gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-5 py-4 text-sm text-red-300">
           <AlertTriangle className="h-5 w-5 shrink-0 text-red-400" />
           <span>{error}</span>

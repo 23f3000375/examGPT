@@ -42,11 +42,27 @@ async def generate_question(
     persist them in the database, and return the new records."""
 
     # 1. Run the Generator loop
-    results = await generate_validated_question(
-        topic=body.topic,
-        sub_topic=body.sub_topic,
-        difficulty=body.difficulty,
-    )
+    try:
+        results = await generate_validated_question(
+            topic=body.topic,
+            sub_topic=body.sub_topic,
+            difficulty=body.difficulty,
+        )
+    except ValueError as exc:
+        logger.error("AI Factory exhausted retries for [%s / %s / %s]: %s", body.topic, body.sub_topic, body.difficulty, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Our AI couldn't generate accurate questions for this topic after multiple attempts. "
+                "This can happen with complex topics. Please try again or pick a different topic/difficulty."
+            ),
+        )
+    except Exception as exc:
+        logger.exception("Unexpected error in AI Factory: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while generating questions. Please try again.",
+        )
 
     db_questions = []
     

@@ -74,10 +74,17 @@ _GENERATOR_SYSTEM = (
     "The questions must be clear, unambiguous, and educational. "
     "Provide a thorough explanation for the correct answer of each question. "
     "Make sure the 10 questions cover a good variety of concepts within the given sub-topic.\n\n"
-    "CRITICAL INSTRUCTION: You must solve the problem step-by-step in your explanation FIRST. "
-    "Once you have your final numerical or logical answer, look at your options (A, B, C, D). "
-    "You MUST ensure that the correct_answer field exactly matches the letter of the option that contains "
-    "your final derived value. Mismatches will result in immediate failure."
+    "CRITICAL RULES YOU MUST FOLLOW FOR EVERY QUESTION:\n"
+    "1. Solve the problem step-by-step in your explanation FIRST.\n"
+    "2. Determine the final numerical or logical answer from your own solution.\n"
+    "3. Make sure that exact value appears as one of the four options (A, B, C, D).\n"
+    "4. Set the correct_answer field to the LETTER of the option that contains your derived value.\n"
+    "5. DOUBLE CHECK: Re-read the option text for the letter you chose. Does it match your answer? "
+    "If not, fix it before outputting.\n\n"
+    "COMMON MISTAKE TO AVOID: Do NOT invent options that don't match your calculations. "
+    "Write simple, clean options where the correct value is clearly present. "
+    "Keep questions straightforward — avoid overly complex multi-step word problems "
+    "that are prone to arithmetic errors."
 )
 
 _CRITIC_SYSTEM = (
@@ -113,8 +120,12 @@ def generator_node(state: AgentState) -> dict:
 
     if error:
         prompt_lines.extend([
-            f"\nYour previous attempt failed with error:\n{error}\n",
-            f"Please generate the 10 questions carefully ensuring strictly valid JSON output."
+            f"\n⚠️ YOUR PREVIOUS BATCH WAS REJECTED BY THE REVIEWER.",
+            f"Reviewer feedback:\n{error}\n",
+            f"You MUST fix the specific issues described above. "
+            f"Generate a completely NEW set of 10 questions. For each question, "
+            f"solve it yourself first, verify the answer matches one of your options, "
+            f"and set the correct_answer letter accordingly."
         ])
     else:
         prompt_lines.append(f"\nGenerate exactly 10 distinct questions for {sub_topic or topic} at {difficulty} difficulty.")
@@ -210,7 +221,7 @@ def _router(state: AgentState) -> str:
         logger.info("Router — batch ACCEPTED on attempt %d", state["attempts"])
         return "end"
 
-    if state["attempts"] >= 3:
+    if state["attempts"] >= 5:
         logger.warning("Router — retry budget exhausted (%d attempts).", state["attempts"])
         return "end"
 
