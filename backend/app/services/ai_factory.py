@@ -38,7 +38,9 @@ SYSTEM_PROMPT = """You are ExamGPT's assessment author. Create exam-quality MCQs
 using ONLY the STUDY TEXT supplied by the user. Do not use background knowledge,
 make up facts, or ask about material absent from that text.
 
-Return exactly 10 distinct multiple-choice questions in the requested difficulty.
+Return exactly 10 distinct multiple-choice questions: three easy, four medium,
+and three hard. Infer the subject from the study text; do not require or invent
+external topic metadata.
 Each question must have four plausible options A through D, exactly one correct
 option, a self-contained explanation, and a source_reference copied verbatim from
 the study text. The source_reference must be the smallest direct snippet that proves
@@ -57,13 +59,14 @@ def _normalise(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _grounding_errors(batch: QuestionBatch, study_text: str, difficulty: Difficulty) -> list[str]:
+def _grounding_errors(batch: QuestionBatch, study_text: str) -> list[str]:
     """Apply deterministic checks that API-level JSON schema cannot express."""
     context = _normalise(study_text).casefold()
     errors: list[str] = []
+    difficulties = [question.difficulty for question in batch.questions]
+    if difficulties.count("easy") != 3 or difficulties.count("medium") != 4 or difficulties.count("hard") != 3:
+        errors.append("batch must contain three easy, four medium, and three hard questions")
     for question in batch.questions:
-        if question.difficulty != difficulty:
-            errors.append(f"{question.id}: difficulty does not match request")
         reference = _normalise(question.source_reference).casefold()
         if reference not in context:
             errors.append(f"{question.id}: source_reference is not a verbatim study-text snippet")
@@ -124,19 +127,19 @@ async def _call_provider(provider: Provider, messages: list[dict[str, str]]) -> 
         raise GenerationError(f"{provider.name} response failed schema validation: {exc}") from exc
 
 
-async def generate_validated_questions(*, topic: str, sub_topic: str, difficulty: Difficulty, study_text: str) -> tuple[QuestionBatch, str]:
+async def generate_validated_questions(*, study_text: str) -> tuple[QuestionBatch, str]:
     """Return a schema-valid, source-grounded batch, trying each configured provider."""
     providers = _providers()
     if not providers:
         raise GenerationError("No LLM provider is configured. Set GROQ_API_KEY or OPENROUTER_API_KEY.")
 
-    user_prompt = f"Topic: {topic}\nSub-topic: {sub_topic}\nRequested difficulty: {difficulty}\n\nSTUDY TEXT START\n{study_text.strip()}\nSTUDY TEXT END"
+    user_prompt = f"STUDY TEXT START\n{study_text.strip()}\nSTUDY TEXT END"
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}]
     failures: list[str] = []
     for provider in providers:
         try:
             batch = await _call_provider(provider, messages)
-            grounding_errors = _grounding_errors(batch, study_text, difficulty)
+            grounding_errors = _grounding_errors(batch, study_text)
             if grounding_errors:
                 raise GenerationError("; ".join(grounding_errors))
             logger.info("Generated grounded batch through %s", provider.name)

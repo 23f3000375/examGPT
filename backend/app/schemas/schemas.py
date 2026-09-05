@@ -57,11 +57,8 @@ class QuestionBatch(StrictModel):
 
 
 class QuestionRequest(StrictModel):
-    """A grounded generation request. Study text is mandatory by design."""
+    """A grounded generation request from pasted study text."""
 
-    topic: str = Field(min_length=1, max_length=100)
-    sub_topic: str = Field(min_length=1, max_length=100)
-    difficulty: Difficulty
     study_text: str = Field(min_length=80, max_length=20_000)
 
 

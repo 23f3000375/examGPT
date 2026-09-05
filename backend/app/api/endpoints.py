@@ -10,7 +10,7 @@ Three routes that connect the AI Factory and SQLAlchemy ORM to the web:
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import cast, func, Float as SAFloat
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,7 @@ from app.schemas.schemas import (
     WeakestTopicResponse,
 )
 from app.services.ai_factory import GenerationError, generate_validated_questions
+from app.services.pdf_extractor import PdfExtractionError, extract_pdf_text
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +43,9 @@ async def generate_question(
 
     # 1. Run the Generator loop
     try:
-        batch, provider = await generate_validated_questions(
-            topic=body.topic,
-            sub_topic=body.sub_topic,
-            difficulty=body.difficulty,
-            study_text=body.study_text,
-        )
+        batch, provider = await generate_validated_questions(study_text=body.study_text)
     except GenerationError as exc:
-        logger.error("Question generation failed for [%s / %s / %s]: %s", body.topic, body.sub_topic, body.difficulty, exc)
+        logger.error("Question generation failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Question generation is temporarily unavailable. Please try again shortly.",
@@ -61,15 +57,37 @@ async def generate_question(
             detail="An unexpected error occurred while generating questions. Please try again.",
         )
 
+    return _persist_questions(db, batch, provider)
+
+
+@api_router.post("/generate-question-from-pdf", status_code=status.HTTP_201_CREATED)
+async def generate_question_from_pdf(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Extract a bounded text PDF in memory and generate grounded questions."""
+    try:
+        study_text = await extract_pdf_text(file)
+        batch, provider = await generate_validated_questions(study_text=study_text)
+    except PdfExtractionError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    except GenerationError as exc:
+        logger.error("PDF question generation failed: %s", exc)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Question generation is temporarily unavailable. Please try again shortly.")
+    return _persist_questions(db, batch, provider)
+
+
+def _persist_questions(db: Session, batch, provider: str):
+    """Persist a validated batch while retaining the format consumed by the UI."""
     db_questions = []
     
     # 2. Build and persist ORM objects
     for generated in batch.questions:
         options = {option.id: option.text for option in generated.options}
         db_question = Question(
-            topic=body.topic,
-            sub_topic=body.sub_topic,
-            difficulty=body.difficulty,
+            topic="User-provided material",
+            sub_topic=None,
+            difficulty=generated.difficulty,
             question_text=generated.question,
             options=options,
             correct_answer=generated.correct_option_id,
@@ -97,7 +115,7 @@ async def generate_question(
             "ai_metadata": {"provider": provider, "is_valid": True},
         })
 
-    logger.info("Persisted %d questions for [%s / %s / %s]", len(output), body.topic, body.sub_topic, body.difficulty)
+    logger.info("Persisted %d grounded questions via %s", len(output), provider)
 
     return output
 
