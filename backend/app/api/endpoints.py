@@ -22,7 +22,7 @@ from app.schemas.schemas import (
     QuestionRequest,
     WeakestTopicResponse,
 )
-from app.services.ai_factory import generate_validated_question
+from app.services.ai_factory import GenerationError, generate_validated_questions
 
 logger = logging.getLogger(__name__)
 
@@ -38,24 +38,21 @@ async def generate_question(
     body: QuestionRequest,
     db: Session = Depends(get_db),
 ):
-    """Call the AI Factory to generate a batch of 10 MCQs,
-    persist them in the database, and return the new records."""
+    """Generate and persist a schema-valid batch grounded in study_text."""
 
     # 1. Run the Generator loop
     try:
-        results = await generate_validated_question(
+        batch, provider = await generate_validated_questions(
             topic=body.topic,
             sub_topic=body.sub_topic,
             difficulty=body.difficulty,
+            study_text=body.study_text,
         )
-    except ValueError as exc:
-        logger.error("AI Factory exhausted retries for [%s / %s / %s]: %s", body.topic, body.sub_topic, body.difficulty, exc)
+    except GenerationError as exc:
+        logger.error("Question generation failed for [%s / %s / %s]: %s", body.topic, body.sub_topic, body.difficulty, exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Our AI couldn't generate accurate questions for this topic after multiple attempts. "
-                "This can happen with complex topics. Please try again or pick a different topic/difficulty."
-            ),
+            detail="Question generation is temporarily unavailable. Please try again shortly.",
         )
     except Exception as exc:
         logger.exception("Unexpected error in AI Factory: %s", exc)
@@ -67,37 +64,37 @@ async def generate_question(
     db_questions = []
     
     # 2. Build and persist ORM objects
-    for res in results:
+    for generated in batch.questions:
+        options = {option.id: option.text for option in generated.options}
         db_question = Question(
             topic=body.topic,
             sub_topic=body.sub_topic,
             difficulty=body.difficulty,
-            question_text=res["question_text"],
-            options=res["options"],
-            correct_answer=res["correct_answer"],
-            explanation=res["explanation"],
+            question_text=generated.question,
+            options=options,
+            correct_answer=generated.correct_option_id,
+            explanation=generated.explanation,
         )
         db.add(db_question)
-        db_questions.append((db_question, res))
+        db_questions.append((db_question, generated))
         
     db.commit()
 
     output = []
-    for db_q, res in db_questions:
+    for db_q, generated in db_questions:
         db.refresh(db_q)
         output.append({
             "id": db_q.id,
             "topic": db_q.topic,
             "sub_topic": db_q.sub_topic,
             "difficulty": db_q.difficulty,
-            "question_text": db_q.question_text,
-            "options": db_q.options,
-            "correct_answer": db_q.correct_answer,
+            "type": generated.type,
+            "question": db_q.question_text,
+            "options": [option.model_dump() for option in generated.options],
+            "correct_option_id": db_q.correct_answer,
             "explanation": db_q.explanation,
-            "ai_metadata": {
-                "attempts": res["attempts"],
-                "is_valid": res["is_valid"],
-            },
+            "source_reference": generated.source_reference,
+            "ai_metadata": {"provider": provider, "is_valid": True},
         })
 
     logger.info("Persisted %d questions for [%s / %s / %s]", len(output), body.topic, body.sub_topic, body.difficulty)

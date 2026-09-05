@@ -1,310 +1,147 @@
-"""
-ExamGPT — AI Factory (Batch Generator + Critic Loop)
+"""Reliable, grounded question generation with provider failover.
 
-Flow:
-    ┌────────────┐        ┌───────────┐
-    │  Generator  │──────▶│   Critic   │
-    └────────────┘        └───────────┘
-          ▲                     │
-          │   error / retry     │  is_valid?
-          └─────────────────────┘
-
-• The **Generator** drafts a batch of 10 MCQs from topic + difficulty.
-• The **Critic** evaluates the entire batch to catch LLM hallucinations (Answer Key Mismatches).
+One schema-constrained LLM request plus local semantic validation is faster and
+more predictable than the former generator/critic loop.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Optional, TypedDict
+import re
+from dataclasses import dataclass
+from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
-from langgraph.graph import END, StateGraph
+import httpx
 from pydantic import ValidationError
 
 from app.core.config import settings
-from app.schemas.schemas import QuestionBatch, CriticEvaluation
+from app.schemas.schemas import Difficulty, QuestionBatch
 
 logger = logging.getLogger(__name__)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  State
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-class AgentState(TypedDict):
-    topic: str
-    sub_topic: Optional[str]
-    difficulty: str
-    current_batch: Optional[QuestionBatch]
-    error: Optional[str]
-    attempts: int
+class GenerationError(RuntimeError):
+    """No configured provider returned a valid, grounded question batch."""
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  LLM Setup
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-_generator_base_llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=settings.GROQ_API_KEY,
-    temperature=0.2, # Lowered to reduce creative hallucinations
-)
-
-_critic_base_llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=settings.GROQ_API_KEY,
-    temperature=0.0,
-)
-
-# Structured-output variant for the batch
-_generator_llm = _generator_base_llm.with_structured_output(QuestionBatch)
-_critic_llm = _critic_base_llm.with_structured_output(CriticEvaluation)
+@dataclass(frozen=True)
+class Provider:
+    name: str
+    url: str
+    api_key: str
+    model: str
+    headers: dict[str, str]
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  System Prompts
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SYSTEM_PROMPT = """You are ExamGPT's assessment author. Create exam-quality MCQs
+using ONLY the STUDY TEXT supplied by the user. Do not use background knowledge,
+make up facts, or ask about material absent from that text.
 
-_GENERATOR_SYSTEM = (
-    "You are an expert exam question writer. "
-    "Generate exactly 10 distinct, high-quality multiple-choice questions (MCQs). "
-    "Each question must have exactly four options (A, B, C, D) and only one option must be correct. "
-    "The questions must be clear, unambiguous, and educational. "
-    "Provide a thorough explanation for the correct answer of each question. "
-    "Make sure the 10 questions cover a good variety of concepts within the given sub-topic.\n\n"
-    "CRITICAL RULES YOU MUST FOLLOW FOR EVERY QUESTION:\n"
-    "1. Solve the problem step-by-step in your explanation FIRST.\n"
-    "2. Determine the final numerical or logical answer from your own solution.\n"
-    "3. Make sure that exact value appears as one of the four options (A, B, C, D).\n"
-    "4. Set the correct_answer field to the LETTER of the option that contains your derived value.\n"
-    "5. DOUBLE CHECK: Re-read the option text for the letter you chose. Does it match your answer? "
-    "If not, fix it before outputting.\n\n"
-    "COMMON MISTAKE TO AVOID: Do NOT invent options that don't match your calculations. "
-    "Write simple, clean options where the correct value is clearly present. "
-    "Keep questions straightforward — avoid overly complex multi-step word problems "
-    "that are prone to arithmetic errors."
-)
+Return exactly 10 distinct multiple-choice questions in the requested difficulty.
+Each question must have four plausible options A through D, exactly one correct
+option, a self-contained explanation, and a source_reference copied verbatim from
+the study text. The source_reference must be the smallest direct snippet that proves
+the answer. Do not include markdown, commentary, citations outside source_reference,
+or fields not present in the supplied JSON Schema.
 
-_CRITIC_SYSTEM = (
-    "You are an extremely rigorous, pedantic quality-assurance reviewer for exam questions. "
-    "Your primary goal is to ensure absolute mathematical and logical correctness of the MCQs.\n\n"
-    "CRITICAL VERIFICATION: Your primary job is to catch Answer Key Mismatches. "
-    "You must independently read the explanation and verify the final derived value. "
-    "Then, look at the options. If the explanation concludes the answer is 68, and 68 is Option C, "
-    "but the correct_answer field says 'B', you MUST return is_valid=False and instruct the generator "
-    "to fix the correct_answer key to match the math. Check all 10 questions in the batch carefully. "
-    "If any single question fails, fail the entire batch and provide the question number and specific fix required."
-)
+Difficulty guide: easy = direct recall or a single explicit inference; medium =
+connect two or more statements in the text; hard = careful comparison, application,
+or multi-step reasoning strictly justified by the text.
+
+Example shape (values are illustrative only):
+{"questions":[{"id":"q1","type":"multiple_choice","difficulty":"medium","question":"Clear question based purely on context?","options":[{"id":"A","text":"Distractor 1"},{"id":"B","text":"Correct Answer"},{"id":"C","text":"Distractor 2"},{"id":"D","text":"Distractor 3"}],"correct_option_id":"B","explanation":"B follows from the supplied text.","source_reference":"Exact supporting sentence from the study text."}]}"""
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Graph Nodes
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _normalise(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
 
-def generator_node(state: AgentState) -> dict:
-    """Draft a batch of 10 MCQs based on topic, sub_topic, difficulty."""
 
-    topic = state["topic"]
-    sub_topic = state.get("sub_topic")
-    difficulty = state["difficulty"]
-    error = state.get("error")
+def _grounding_errors(batch: QuestionBatch, study_text: str, difficulty: Difficulty) -> list[str]:
+    """Apply deterministic checks that API-level JSON schema cannot express."""
+    context = _normalise(study_text).casefold()
+    errors: list[str] = []
+    for question in batch.questions:
+        if question.difficulty != difficulty:
+            errors.append(f"{question.id}: difficulty does not match request")
+        reference = _normalise(question.source_reference).casefold()
+        if reference not in context:
+            errors.append(f"{question.id}: source_reference is not a verbatim study-text snippet")
+        correct_text = next(option.text for option in question.options if option.id == question.correct_option_id)
+        explanation = _normalise(question.explanation).casefold()
+        if (_normalise(correct_text).casefold() not in explanation and question.correct_option_id.casefold() not in explanation):
+            errors.append(f"{question.id}: explanation does not identify the selected answer")
+    return errors
 
-    prompt_lines = [
-        f"Topic: {topic}",
-    ]
-    if sub_topic:
-        prompt_lines.append(f"Sub-Topic: {sub_topic}")
-    prompt_lines.append(f"Difficulty: {difficulty}")
 
-    if error:
-        prompt_lines.extend([
-            f"\n⚠️ YOUR PREVIOUS BATCH WAS REJECTED BY THE REVIEWER.",
-            f"Reviewer feedback:\n{error}\n",
-            f"You MUST fix the specific issues described above. "
-            f"Generate a completely NEW set of 10 questions. For each question, "
-            f"solve it yourself first, verify the answer matches one of your options, "
-            f"and set the correct_answer letter accordingly."
-        ])
-    else:
-        prompt_lines.append(f"\nGenerate exactly 10 distinct questions for {sub_topic or topic} at {difficulty} difficulty.")
+def _extract_json(content: Any) -> str:
+    """Recover JSON from an imperfect provider response before validation."""
+    if isinstance(content, (dict, list)):
+        return json.dumps(content)
+    if not isinstance(content, str) or not content.strip():
+        raise GenerationError("provider returned an empty response")
+    candidate = content.strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.IGNORECASE)
+    start, end = candidate.find("{"), candidate.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise GenerationError("provider response did not contain a JSON object")
+    return candidate[start : end + 1]
 
-    user_prompt = "\n".join(prompt_lines)
 
-    logger.info(
-        "Generator — batch attempt %d for [%s / %s / %s]",
-        state["attempts"] + 1,
-        topic,
-        sub_topic,
-        difficulty,
-    )
+def _providers() -> list[Provider]:
+    providers: list[Provider] = []
+    if settings.GROQ_API_KEY:
+        providers.append(Provider("groq", "https://api.groq.com/openai/v1/chat/completions", settings.GROQ_API_KEY, settings.GROQ_MODEL, {}))
+    if settings.OPENROUTER_API_KEY:
+        providers.append(Provider("openrouter", "https://openrouter.ai/api/v1/chat/completions", settings.OPENROUTER_API_KEY, settings.OPENROUTER_MODEL, {"HTTP-Referer": settings.APP_URL, "X-Title": settings.APP_NAME}))
+    return providers
 
+
+async def _call_provider(provider: Provider, messages: list[dict[str, str]]) -> QuestionBatch:
+    payload = {
+        "model": provider.model,
+        "messages": messages,
+        "temperature": 0,
+        "stream": False,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "examgpt_question_batch", "strict": True, "schema": QuestionBatch.model_json_schema()},
+        },
+    }
+    headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json", **provider.headers}
+    async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT_SECONDS) as client:
+        response = await client.post(provider.url, json=payload, headers=headers)
+        response.raise_for_status()
+    body = response.json()
     try:
-        result = _generator_llm.invoke(
-            [SystemMessage(content=_GENERATOR_SYSTEM), HumanMessage(content=user_prompt)]
-        )
-        if isinstance(result, dict):
-            result = QuestionBatch(**result)
-    except (ValidationError, Exception) as exc:
-        logger.warning(
-            "Generator — LLM output failed validation on attempt %d: %s",
-            state["attempts"] + 1,
-            exc,
-        )
-        return {
-            "current_batch": None,
-            "error": f"LLM output was malformed: {exc}",
-            "attempts": state["attempts"] + 1,
-        }
-
-    return {
-        "current_batch": result,
-        "error": None,
-        "attempts": state["attempts"] + 1,
-    }
-
-
-def critic_node(state: AgentState) -> dict:
-    """Evaluate the generated batch of 10 MCQs."""
-    batch = state.get("current_batch")
-    
-    if not batch:
-        return {
-            "error": "No questions were generated.",
-            "attempts": state["attempts"]
-        }
-
-    if isinstance(batch, dict):
-        batch = QuestionBatch(**batch)
-
-    questions_text = []
-    for i, q in enumerate(batch.questions, 1):
-        options_dict = _options_to_dict(q.options)
-        opts = "\n".join(f"  {k}. {v}" for k, v in options_dict.items())
-        questions_text.append(
-            f"Question {i}:\n{q.question_text}\nOptions:\n{opts}\n"
-            f"Correct Answer: {q.correct_answer}\nExplanation: {q.explanation}\n"
-        )
-        
-    user_prompt = "Evaluate the following batch of 10 MCQs for Answer Key Mismatches:\n\n" + "\n---\n".join(questions_text)
-    
-    logger.info("Critic — reviewing batch attempt %d", state["attempts"])
-
+        content = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise GenerationError(f"{provider.name} returned an unexpected response envelope") from exc
     try:
-        result = _critic_llm.invoke(
-            [SystemMessage(content=_CRITIC_SYSTEM), HumanMessage(content=user_prompt)]
-        )
-        if isinstance(result, dict):
-            result = CriticEvaluation(**result)
-    except (ValidationError, Exception) as exc:
-        logger.warning("Critic — LLM output failed validation: %s", exc)
-        return {
-            "error": f"Critic evaluation failed: {exc}",
-        }
-
-    if not result.is_valid:
-        logger.warning("Critic — batch failed validation. Feedback: %s", result.feedback)
-        return {
-            "current_batch": None,
-            "error": result.feedback,
-        }
-
-    return {
-        "error": None,
-    }
+        return QuestionBatch.model_validate_json(_extract_json(content))
+    except (ValidationError, json.JSONDecodeError, GenerationError) as exc:
+        raise GenerationError(f"{provider.name} response failed schema validation: {exc}") from exc
 
 
-def _router(state: AgentState) -> str:
-    """Decide if we succeeded or need to retry generating the batch."""
-    if state.get("current_batch") is not None and not state.get("error"):
-        logger.info("Router — batch ACCEPTED on attempt %d", state["attempts"])
-        return "end"
+async def generate_validated_questions(*, topic: str, sub_topic: str, difficulty: Difficulty, study_text: str) -> tuple[QuestionBatch, str]:
+    """Return a schema-valid, source-grounded batch, trying each configured provider."""
+    providers = _providers()
+    if not providers:
+        raise GenerationError("No LLM provider is configured. Set GROQ_API_KEY or OPENROUTER_API_KEY.")
 
-    if state["attempts"] >= 5:
-        logger.warning("Router — retry budget exhausted (%d attempts).", state["attempts"])
-        return "end"
-
-    logger.info("Router — batch REJECTED due to error, retrying (attempt %d)", state["attempts"])
-    return "retry"
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Graph Compilation
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-_workflow = StateGraph(AgentState)
-_workflow.add_node("generator", generator_node)
-_workflow.add_node("critic", critic_node)
-_workflow.set_entry_point("generator")
-_workflow.add_edge("generator", "critic")
-_workflow.add_conditional_edges(
-    "critic",
-    _router,
-    {
-        "retry": "generator",
-        "end": END,
-    },
-)
-
-exam_graph = _workflow.compile()
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Helper — normalise options to a plain dict
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-def _options_to_dict(options) -> dict[str, str]:
-    if hasattr(options, "model_dump"):
-        return options.model_dump()
-    if isinstance(options, dict):
-        return options
-    return dict(options)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Public Entry Point
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-async def generate_validated_question(
-    topic: str,
-    sub_topic: str,
-    difficulty: str,
-) -> list[dict]:
-    """Run the Generator to produce a batch of 10 questions.
-
-    Returns
-    -------
-    list[dict]
-        A list of 10 questions.
-    """
-    initial_state: AgentState = {
-        "topic": topic,
-        "sub_topic": sub_topic,
-        "difficulty": difficulty,
-        "current_batch": None,
-        "error": None,
-        "attempts": 0,
-    }
-
-    final_state = await exam_graph.ainvoke(initial_state)
-
-    batch = final_state["current_batch"]
-    if batch is None:
-        raise ValueError("AI Factory failed to generate questions after all retries.")
-
-    if isinstance(batch, dict):
-        batch = QuestionBatch(**batch)
-
-    output = []
-    for q in batch.questions:
-        output.append({
-            "question_text": q.question_text,
-            "options": _options_to_dict(q.options),
-            "correct_answer": q.correct_answer,
-            "explanation": q.explanation,
-            "attempts": final_state["attempts"],
-            "is_valid": True,  # assumed valid since critic is bypassed
-        })
-
-    return output
+    user_prompt = f"Topic: {topic}\nSub-topic: {sub_topic}\nRequested difficulty: {difficulty}\n\nSTUDY TEXT START\n{study_text.strip()}\nSTUDY TEXT END"
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}]
+    failures: list[str] = []
+    for provider in providers:
+        try:
+            batch = await _call_provider(provider, messages)
+            grounding_errors = _grounding_errors(batch, study_text, difficulty)
+            if grounding_errors:
+                raise GenerationError("; ".join(grounding_errors))
+            logger.info("Generated grounded batch through %s", provider.name)
+            return batch, provider.name
+        except (httpx.HTTPError, GenerationError) as exc:
+            logger.warning("Question generation via %s failed: %s", provider.name, exc)
+            failures.append(f"{provider.name}: {exc}")
+    raise GenerationError("All LLM providers failed validation. " + " | ".join(failures))

@@ -1,118 +1,85 @@
-"""
-ExamGPT — Pydantic Data Contracts
+"""Pydantic contracts for ExamGPT's public API and LLM output."""
 
-Strict schemas used to validate structured output from the LLM,
-and request/response models for the API layer.
-"""
+from typing import Literal, Optional
 
-from typing import Dict, Literal, Optional
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  LLM Structured-Output Contracts
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class StrictModel(BaseModel):
+    """Reject invented fields from an LLM instead of silently ignoring them."""
 
-class QuestionOptions(BaseModel):
-    A: str
-    B: str
-    C: str
-    D: str
-
-class GeneratedQuestion(BaseModel):
-    """Schema for a single MCQ produced by the Generator agent."""
-
-    question_text: str = Field(
-        ...,
-        description="The full text of the multiple-choice question.",
-    )
-    options: QuestionOptions = Field(
-        ...,
-        description="The four options for the multiple-choice question.",
-    )
-    correct_answer: Literal["A", "B", "C", "D"] = Field(
-        ...,
-        description="The letter key of the correct option.",
-    )
-    explanation: str = Field(
-        ...,
-        description="A clear, concise explanation of why the correct answer is right.",
-    )
-
-class QuestionBatch(BaseModel):
-    """Schema for a batch of MCQs produced by the Generator agent."""
-    questions: list[GeneratedQuestion] = Field(
-        ...,
-        description="A list of 10 distinct, high-quality multiple-choice questions.",
-    )
+    model_config = ConfigDict(extra="forbid")
 
 
-class CriticEvaluation(BaseModel):
-    """Schema for the Critic agent's verdict on a generated question."""
-
-    is_valid: bool = Field(
-        ...,
-        description=(
-            "True if the question is logically sound, unambiguous, "
-            "and has exactly one correct answer.  False otherwise."
-        ),
-    )
-    feedback: str = Field(
-        ...,
-        description=(
-            "Actionable feedback explaining what is wrong with the question, "
-            "or a short confirmation that it passes all checks."
-        ),
-    )
+Difficulty = Literal["easy", "medium", "hard"]
+OptionId = Literal["A", "B", "C", "D"]
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  API Request Schemas
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-class QuestionRequest(BaseModel):
-    """POST /api/generate-question request body."""
-
-    topic: str = Field(..., min_length=1, description="Subject area, e.g. 'Python'.")
-    sub_topic: str = Field(..., min_length=1, description="Narrower focus, e.g. 'List Comprehensions'.")
-    difficulty: str = Field(..., description="One of 'easy', 'medium', or 'hard'.")
+class QuestionOption(StrictModel):
+    id: OptionId
+    text: str = Field(min_length=1, max_length=500)
 
 
-class AnswerSubmission(BaseModel):
-    """POST /api/submit-answer request body."""
+class GeneratedQuestion(StrictModel):
+    """One grounded MCQ. This is also the JSON Schema sent to providers."""
 
-    user_id: int = Field(..., gt=0)
-    question_id: int = Field(..., gt=0)
-    chosen_option: Literal["A", "B", "C", "D"]
-    time_taken_seconds: float = Field(..., ge=0)
+    id: str = Field(pattern=r"^q(?:[1-9]|10)$")
+    type: Literal["multiple_choice"]
+    difficulty: Difficulty
+    question: str = Field(min_length=8, max_length=1_200)
+    options: list[QuestionOption] = Field(min_length=4, max_length=4)
+    correct_option_id: OptionId
+    explanation: str = Field(min_length=20, max_length=2_000)
+    source_reference: str = Field(min_length=8, max_length=700)
+
+    @model_validator(mode="after")
+    def options_are_complete_and_answerable(self) -> "GeneratedQuestion":
+        option_ids = [option.id for option in self.options]
+        if set(option_ids) != {"A", "B", "C", "D"} or len(set(option_ids)) != 4:
+            raise ValueError("options must contain A, B, C, and D exactly once")
+        if self.correct_option_id not in option_ids:
+            raise ValueError("correct_option_id must refer to one of the options")
+        return self
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  API Response Schemas
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class QuestionBatch(StrictModel):
+    questions: list[GeneratedQuestion] = Field(min_length=10, max_length=10)
 
-class AnswerResponse(BaseModel):
-    """POST /api/submit-answer response body."""
+    @model_validator(mode="after")
+    def questions_are_distinct(self) -> "QuestionBatch":
+        ids = [question.id for question in self.questions]
+        prompts = [question.question.casefold().strip() for question in self.questions]
+        if len(set(ids)) != 10:
+            raise ValueError("question ids must be unique")
+        if len(set(prompts)) != 10:
+            raise ValueError("questions must be distinct")
+        return self
 
+
+class QuestionRequest(StrictModel):
+    """A grounded generation request. Study text is mandatory by design."""
+
+    topic: str = Field(min_length=1, max_length=100)
+    sub_topic: str = Field(min_length=1, max_length=100)
+    difficulty: Difficulty
+    study_text: str = Field(min_length=80, max_length=20_000)
+
+
+class AnswerSubmission(StrictModel):
+    user_id: int = Field(gt=0)
+    question_id: int = Field(gt=0)
+    chosen_option: OptionId
+    time_taken_seconds: float = Field(ge=0)
+
+
+class AnswerResponse(StrictModel):
     is_correct: bool
     correct_answer: str
     explanation: Optional[str]
 
 
-class WeakestTopicResponse(BaseModel):
-    """GET /api/weakest-topic/{user_id} response body."""
-
+class WeakestTopicResponse(StrictModel):
     user_id: int
-    weakest_sub_topic: Optional[str] = Field(
-        None,
-        description="The sub-topic with the lowest accuracy, or null if no data.",
-    )
-    accuracy: Optional[float] = Field(
-        None,
-        description="The accuracy percentage (0–100) for the weakest sub-topic.",
-    )
-    total_attempts: Optional[int] = Field(
-        None,
-        description="Number of questions attempted in that sub-topic.",
-    )
+    weakest_sub_topic: Optional[str] = None
+    accuracy: Optional[float] = None
+    total_attempts: Optional[int] = None

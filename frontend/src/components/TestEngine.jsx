@@ -21,7 +21,7 @@ const USER_ID = 1;
 
 function TestEngine({ testConfig, onBack }) {
   // ── Guard Clause ──────────────────────────────────────────
-  if (!testConfig || !testConfig.topic || !testConfig.subTopic) {
+  if (!testConfig || !testConfig.topic || !testConfig.subTopic || !testConfig.studyText) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center space-y-6">
         <div className="p-4 bg-red-500/10 rounded-full border border-red-500/20">
@@ -44,7 +44,7 @@ function TestEngine({ testConfig, onBack }) {
     );
   }
 
-  const { topic, subTopic, difficulty } = testConfig;
+  const { topic, subTopic, difficulty, studyText } = testConfig;
 
   // ── State ────────────────────────────────────────────────
   const [questions, setQuestions] = useState([]);
@@ -76,6 +76,7 @@ function TestEngine({ testConfig, onBack }) {
             topic: topic,
             sub_topic: subTopic,
             difficulty: difficulty,
+            study_text: studyText,
           }
         );
 
@@ -108,7 +109,7 @@ function TestEngine({ testConfig, onBack }) {
     return () => {
       cancelled = true;
     };
-  }, [topic, subTopic, difficulty]);
+  }, [topic, subTopic, difficulty, studyText]);
 
   // ── Submit answer ────────────────────────────────────────
   const handleSubmit = async () => {
@@ -159,9 +160,9 @@ function TestEngine({ testConfig, onBack }) {
   };
 
   const difficultyColor = {
-    Easy: "text-emerald-400 bg-emerald-500/15",
-    Medium: "text-amber-400 bg-amber-500/15",
-    Hard: "text-red-400 bg-red-500/15",
+    easy: "text-emerald-400 bg-emerald-500/15",
+    medium: "text-amber-400 bg-amber-500/15",
+    hard: "text-red-400 bg-red-500/15",
   }[difficulty] || "text-gray-400 bg-gray-500/15";
 
   const getOptionStyle = (key) => {
@@ -241,7 +242,7 @@ function TestEngine({ testConfig, onBack }) {
             </span>
             <ChevronRight className="h-3 w-3 text-gray-600" />
             <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${difficultyColor}`}>
-              {difficulty}
+              {difficulty[0].toUpperCase() + difficulty.slice(1)}
             </span>
           </div>
         </div>
@@ -284,7 +285,7 @@ function TestEngine({ testConfig, onBack }) {
                   try {
                     const { data } = await axios.post(
                       `${API_BASE}/api/generate-question`,
-                      { topic, sub_topic: subTopic, difficulty }
+                      { topic, sub_topic: subTopic, difficulty, study_text: studyText }
                     );
                     setQuestions(data);
                     setCurrentIndex(0);
@@ -346,13 +347,13 @@ function TestEngine({ testConfig, onBack }) {
 
           <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-8 shadow-lg">
             <p className="text-xl font-medium leading-relaxed tracking-wide text-white">
-              {currentQuestion.question_text}
+              {currentQuestion.question}
             </p>
           </div>
 
           {/* Options */}
           <div className="grid gap-3">
-            {Object.entries(currentQuestion.options).map(([key, text]) => (
+            {currentQuestion.options.map(({ id: key, text }) => (
               <button
                 key={key}
                 onClick={() => {
@@ -428,6 +429,11 @@ function TestEngine({ testConfig, onBack }) {
                   <p className="text-[15px] leading-relaxed text-gray-300 whitespace-pre-line">
                     {gradingResult.explanation}
                   </p>
+                  {currentQuestion.source_reference && (
+                    <p className="mt-4 border-t border-blue-400/20 pt-4 text-sm italic leading-relaxed text-blue-200/80">
+                      Source: “{currentQuestion.source_reference}”
+                    </p>
+                  )}
                 </div>
               )}
 
