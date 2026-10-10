@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import {
   ArrowLeft,
@@ -20,8 +20,109 @@ const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const USER_ID = 1;
 
 function TestEngine({ testConfig, onBack }) {
-  // ── Guard Clause ──────────────────────────────────────────
-  if (!testConfig || !testConfig.topic || !testConfig.subTopic) {
+  const { topic, subTopic, difficulty, studyText } = testConfig || {};
+
+  // ── State ────────────────────────────────────────────────
+  const [questions, setQuestions] = useState([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [score, setScore] = useState(0);
+
+  const [selectedOption, setSelectedOption] = useState(null);
+  const [isSubmitted, setIsSubmitted] = useState(false);
+  const [gradingResult, setGradingResult] = useState(null);
+  
+  const [loading, setLoading] = useState(true);
+  const [progressState, setProgressState] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+  const [fallbackText, setFallbackText] = useState("");
+
+  const startTimeRef = useRef(null);
+
+  const startGeneration = useCallback(async (isCancelled = () => false, text = studyText) => {
+    setLoading(true);
+    setError(null);
+    setProgressState(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/generate-question-stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic: topic,
+          sub_topic: subTopic,
+          difficulty: difficulty,
+          study_text: text,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to connect to generation stream.");
+      }
+      if (!response.body) {
+        throw new Error("The generation stream returned no response body.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (!isCancelled()) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop(); 
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            let event;
+            try {
+              event = JSON.parse(line.slice(6));
+            } catch {
+              continue;
+            }
+            if (event.detail) {
+              throw new Error(event.detail);
+            }
+            if (event.status === "generating" || event.status === "progress") {
+              setProgressState({
+                chunk: event.chunk,
+                total_chunks: event.total_chunks,
+                provider: event.provider,
+              });
+            } else if (event.status === "complete") {
+              setQuestions(event.batch);
+              setCurrentIndex(0);
+              setScore(0);
+              startTimeRef.current = Date.now();
+            }
+          }
+        }
+      }
+    } catch (err) {
+      if (!isCancelled()) {
+        console.error("Failed to generate batch:", err);
+        setError(err.message || "Failed to generate questions.");
+      }
+    } finally {
+      if (!isCancelled()) setLoading(false);
+    }
+  }, [difficulty, studyText, subTopic, topic]);
+
+  // ── Generate batch on mount ─────────────────────────────
+  useEffect(() => {
+    if (!topic || !subTopic) return undefined;
+    let cancelled = false;
+    const timer = window.setTimeout(() => startGeneration(() => cancelled), 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [startGeneration, topic, subTopic]);
+
+  if (!topic || !subTopic) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center space-y-6">
         <div className="p-4 bg-red-500/10 rounded-full border border-red-500/20">
@@ -43,106 +144,6 @@ function TestEngine({ testConfig, onBack }) {
       </div>
     );
   }
-
-  const { topic, subTopic, difficulty, studyText } = testConfig;
-
-  // ── State ────────────────────────────────────────────────
-  const [questions, setQuestions] = useState([]);
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [score, setScore] = useState(0);
-
-  const [selectedOption, setSelectedOption] = useState(null);
-  const [isSubmitted, setIsSubmitted] = useState(false);
-  const [gradingResult, setGradingResult] = useState(null);
-  
-  const [loading, setLoading] = useState(true);
-  const [progressState, setProgressState] = useState(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState(null);
-  const [fallbackText, setFallbackText] = useState("");
-
-  const startTimeRef = useRef(null);
-
-  const startGeneration = async (isCancelled = () => false) => {
-    setLoading(true);
-    setError(null);
-    setProgressState(null);
-
-    try {
-      const response = await fetch(`${API_BASE}/api/generate-question-stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          topic: topic,
-          sub_topic: subTopic,
-          difficulty: difficulty,
-          study_text: studyText,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to connect to generation stream.");
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (!isCancelled()) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop(); 
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const dataStr = line.slice(6);
-            try {
-              const event = JSON.parse(dataStr);
-              if (event.detail) {
-                  throw new Error(event.detail);
-              }
-              if (event.status === "generating" || event.status === "progress") {
-                setProgressState({
-                  chunk: event.chunk,
-                  total_chunks: event.total_chunks,
-                  provider: event.provider,
-                });
-              } else if (event.status === "complete") {
-                setQuestions(event.batch);
-                setCurrentIndex(0);
-                setScore(0);
-                startTimeRef.current = Date.now();
-              }
-            } catch (e) {
-              if (e.message && event?.detail) {
-                 throw e;
-              }
-              // Ignore invalid JSON
-            }
-          }
-        }
-      }
-    } catch (err) {
-      if (!isCancelled()) {
-        console.error("Failed to generate batch:", err);
-        setError(err.message || "Failed to generate questions.");
-      }
-    } finally {
-      if (!isCancelled()) setLoading(false);
-    }
-  };
-
-  // ── Generate batch on mount ─────────────────────────────
-  useEffect(() => {
-    let cancelled = false;
-    startGeneration(() => cancelled);
-    return () => {
-      cancelled = true;
-    };
-  }, [topic, subTopic, difficulty, studyText]);
 
   // ── Submit answer ────────────────────────────────────────
   const handleSubmit = async () => {
@@ -299,8 +300,9 @@ function TestEngine({ testConfig, onBack }) {
           <div className="text-center w-full">
             <h2 className="text-xl font-bold text-white mb-2">Generation Failed</h2>
             <p className="text-gray-400 text-sm leading-relaxed mb-6">
-              Our APIs are currently under heavy load or failed to generate questions for this topic. 
-              Please paste up to 20,000 characters of related text below, and we'll generate questions from it.
+              Gemini and Groq could not generate this test. Paste 80 to 20,000 characters
+              of study material and we will create questions locally, using web search
+              when available. No LLM provider is required for this fallback.
             </p>
             <textarea
               value={fallbackText}
@@ -321,17 +323,12 @@ function TestEngine({ testConfig, onBack }) {
               Change Topic
             </button>
             <button
-              onClick={() => {
-                if (fallbackText.trim().length >= 80) {
-                  testConfig.studyText = fallbackText.trim();
-                  startGeneration();
-                }
-              }}
-              disabled={fallbackText.trim().length < 80}
+              onClick={() => startGeneration(() => false, fallbackText.trim())}
+              disabled={fallbackText.trim().length < 80 || fallbackText.trim().length > 20000}
               className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-600/25 transition hover:bg-violet-500 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <RotateCcw className="h-4 w-4" />
-              Retry with Text
+              Generate with Text + Web Search
             </button>
           </div>
         </div>
@@ -459,13 +456,19 @@ function TestEngine({ testConfig, onBack }) {
                   </p>
                   {currentQuestion.source_reference && (
                     <p className="mt-4 border-t border-blue-400/20 pt-4 text-sm italic leading-relaxed text-blue-200/80 flex flex-col gap-1">
-                      {currentQuestion.source_reference.startsWith("Web:") ? (
+                      {currentQuestion.source_reference.startsWith("Web search:") ||
+                      currentQuestion.source_reference.startsWith("Web:") ? (
                         <>
                           <span className="flex items-center gap-1.5 font-semibold text-blue-300">
                             <BookOpen className="h-4 w-4" /> Sourced from Web
                           </span>
-                          <a href={currentQuestion.source_reference.slice(5)} target="_blank" rel="noreferrer" className="underline hover:text-blue-100">
-                            {currentQuestion.source_reference.slice(5)}
+                          <a
+                            href={currentQuestion.source_reference.replace(/^Web(?: search)?:\s*/, "")}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline hover:text-blue-100"
+                          >
+                            {currentQuestion.source_reference.replace(/^Web(?: search)?:\s*/, "")}
                           </a>
                         </>
                       ) : (

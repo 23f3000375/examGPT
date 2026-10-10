@@ -1,29 +1,33 @@
 # ExamGPT
 
-ExamGPT generates ten multiple-choice practice questions grounded exclusively in
-study text supplied by the learner.
+ExamGPT generates ten multiple-choice practice questions from a selected topic
+and, when needed, study text supplied by the learner.
 
 ## Reliable generation pipeline
 
-- The API requires `study_text` (80–20,000 characters); there is no ungrounded
-  topic-only generation path.
-- Groq is the primary OpenAI-compatible provider and OpenRouter is attempted if
-  Groq fails or returns an invalid response.
+- Gemini is tried first, followed by Groq. Configure provider keys in
+  `backend/.env`; never put keys in frontend code or commit them.
 - Each request uses JSON Schema structured outputs with `strict: true`, then
   Pydantic validates exactly ten distinct questions, A–D options, answer keys,
   and unexpected fields.
-- A local grounding gate rejects batches unless every `source_reference` is a
-  verbatim snippet of the submitted study text and each explanation names its
-  correct option.
+- If both providers are unavailable, the UI lets the learner paste 80–20,000
+  characters of material. A no-LLM fallback creates text-completion questions
+  from the supplied passage and tries DuckDuckGo search for additional
+  attributed snippets; generation still works from the passage if search is
+  unavailable.
+- Provider-generated questions are checked against the pasted text when it is
+  supplied. The local fallback cites the exact passage sentence or web result
+  URL used for each question.
 
 ## Setup
 
 1. Start PostgreSQL: `docker compose up -d`.
-2. Copy `backend/.env.example` to `backend/.env` and set at least one API key.
+2. Copy `backend/.env.example` to `backend/.env`. Set `GEMINI_API_KEY` and/or
+   `GROQ_API_KEY` to enable those providers. The text fallback does not require
+   an API key.
 3. In `backend`, run `pip install -r requirements.txt`, then `python init_db.py`
    and `uvicorn app.main:app --reload`.
 4. In `frontend`, run `npm install` and `npm run dev`.
 
-The Groq model must support strict JSON Schema structured outputs. The default
-`openai/gpt-oss-20b` is selected for that capability; override it in `.env` if
-your account uses another supported model.
+Gemini defaults to `gemini-2.5-flash`, and Groq defaults to
+`openai/gpt-oss-20b`; override either model in `.env` if needed.

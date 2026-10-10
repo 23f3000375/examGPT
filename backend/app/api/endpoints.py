@@ -13,6 +13,7 @@ import logging
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import cast, func, Float as SAFloat
 from sqlalchemy.orm import Session
+from sse_starlette.sse import EventSourceResponse
 
 from app.core.database import get_db
 from app.models.models import Question, UserPerformance
@@ -25,10 +26,6 @@ from app.schemas.schemas import (
 from app.services.ai_factory import GenerationError, generate_validated_questions, generate_validated_questions_stream
 from app.services.pdf_extractor import PdfExtractionError, extract_pdf_text
 import json
-try:
-    from sse_starlette.sse import EventSourceResponse
-except ImportError:
-    pass
 
 logger = logging.getLogger(__name__)
 

@@ -72,9 +72,18 @@ class QuestionBatch(StrictModel):
 
 
 class QuestionRequest(StrictModel):
-    """A grounded generation request from pasted study text."""
+    """A question-generation request; study text is needed for local fallback."""
 
-    study_text: str = Field(min_length=80, max_length=20_000)
+    topic: str = Field(min_length=1, max_length=120)
+    sub_topic: str = Field(min_length=1, max_length=120)
+    difficulty: Difficulty
+    study_text: str = Field(default="", max_length=20_000)
+
+    @model_validator(mode="after")
+    def study_text_is_bounded_when_provided(self) -> "QuestionRequest":
+        if self.study_text.strip() and len(self.study_text.strip()) < 80:
+            raise ValueError("study_text must contain at least 80 non-whitespace characters")
+        return self
 
 
 class AnswerSubmission(StrictModel):
