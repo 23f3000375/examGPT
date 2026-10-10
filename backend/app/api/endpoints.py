@@ -48,7 +48,7 @@ async def generate_question(
 
     # 1. Run the Generator loop
     try:
-        batch, provider = await generate_validated_questions(study_text=body.study_text)
+        batch, provider = await generate_validated_questions(topic=body.topic, sub_topic=body.sub_topic, difficulty=body.difficulty, study_text=body.study_text)
     except GenerationError as exc:
         logger.error("Question generation failed: %s", exc)
         raise HTTPException(
@@ -74,7 +74,7 @@ async def generate_question_stream(
     
     async def event_generator():
         try:
-            async for event in generate_validated_questions_stream(study_text=body.study_text):
+            async for event in generate_validated_questions_stream(topic=body.topic, sub_topic=body.sub_topic, difficulty=body.difficulty, study_text=body.study_text):
                 if event["status"] == "complete":
                     # We have the final batch, persist it
                     from app.schemas.schemas import QuestionBatch
@@ -110,7 +110,7 @@ async def generate_question_from_pdf(
     """Extract a bounded text PDF in memory and generate grounded questions."""
     try:
         study_text = await extract_pdf_text(file)
-        batch, provider = await generate_validated_questions(study_text=study_text)
+        batch, provider = await generate_validated_questions(topic="PDF Upload", sub_topic="General", difficulty="medium", study_text=study_text)
     except PdfExtractionError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     except GenerationError as exc:

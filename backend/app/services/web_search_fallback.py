@@ -31,8 +31,11 @@ def extract_keywords(study_text: str, max_words: int = 5) -> str:
     top_words = [w[0] for w in sorted_words[:max_words]]
     return " ".join(top_words)
 
-async def fallback_generate_questions(study_text: str, chunk_index: int, chunk_size: int) -> QuestionChunk:
+async def fallback_generate_questions(study_text: str, topic: str, sub_topic: str, difficulty: str, chunk_index: int, chunk_size: int) -> QuestionChunk:
     """Fallback generator that uses web search/scraping to find questions."""
+    if not study_text.strip():
+        raise ValueError("Web search failed without specific study text to query.")
+        
     keywords = extract_keywords(study_text)
     logger.info(f"Using web search fallback with keywords: {keywords}")
     

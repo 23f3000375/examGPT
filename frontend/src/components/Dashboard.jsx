@@ -10,15 +10,35 @@ import {
 
 /* ── Constants for dropdowns ─────────────────────────────── */
 const EXAM_SECTIONS = [
-  "Quantitative Aptitude",
-  "Logical Reasoning",
-  "Verbal Ability",
+  "CAT",
+  "GATE",
+  "General Aptitude",
+  "General Knowledge",
+  "General Studies",
+  "Mathematics",
+  "Computer Science",
 ];
 
 const DIFFICULTIES = ["Easy", "Medium", "Hard"];
 
 const DEFAULT_TOPICS = {
-  "Quantitative Aptitude": [
+  "CAT": [
+    "Quantitative Ability",
+    "Data Interpretation",
+    "Logical Reasoning",
+    "Verbal Ability",
+    "Reading Comprehension",
+  ],
+  "GATE": [
+    "Engineering Mathematics",
+    "General Aptitude",
+    "Algorithms",
+    "Data Structures",
+    "Computer Networks",
+    "Operating Systems",
+    "Databases",
+  ],
+  "General Aptitude": [
     "Percentages",
     "Time & Work",
     "Algebra",
@@ -26,18 +46,30 @@ const DEFAULT_TOPICS = {
     "Probability",
     "Ratio & Proportion",
   ],
-  "Logical Reasoning": [
-    "Syllogisms",
-    "Blood Relations",
-    "Puzzles",
-    "Data Sufficiency",
-    "Direction Sense",
+  "General Knowledge": [
+    "History",
+    "Geography",
+    "Indian Polity",
+    "Economics",
+    "Current Affairs",
   ],
-  "Verbal Ability": [
-    "Reading Comprehension",
-    "Sentence Correction",
-    "Vocabulary",
-    "Para Jumbles",
+  "General Studies": [
+    "Indian National Movement",
+    "World Geography",
+    "Indian Economy",
+    "Science & Technology",
+  ],
+  "Mathematics": [
+    "Matrices and Determinants",
+    "Calculus",
+    "Probability",
+    "Linear Algebra",
+  ],
+  "Computer Science": [
+    "DBMS",
+    "Machine Learning",
+    "Artificial Intelligence",
+    "Operating Systems",
   ],
 };
 
@@ -46,7 +78,6 @@ function Dashboard({ onStartTest }) {
   const [selectedSection, setSelectedSection] = useState(EXAM_SECTIONS[0]);
   const [selectedTopic, setSelectedTopic] = useState(DEFAULT_TOPICS[EXAM_SECTIONS[0]][0]);
   const [selectedDifficulty, setSelectedDifficulty] = useState(DIFFICULTIES[1]);
-  const [studyText, setStudyText] = useState("");
 
   // ── When section changes, reset topic to the first for that section ──
   const handleSectionChange = (section) => {
@@ -61,7 +92,7 @@ function Dashboard({ onStartTest }) {
       topic: selectedSection,
       subTopic: selectedTopic.trim(),
       difficulty: selectedDifficulty.toLowerCase(),
-      studyText: studyText.trim(),
+      studyText: "", // Initial load doesn't have study text
     });
   };
 
@@ -117,22 +148,6 @@ function Dashboard({ onStartTest }) {
             options={DIFFICULTIES}
           />
         </div>
-
-        <div className="mt-6">
-          <label className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-gray-400">
-            <BookOpen className="h-4 w-4 text-gray-400" />
-            Study text
-          </label>
-          <textarea
-            value={studyText}
-            onChange={(event) => setStudyText(event.target.value)}
-            rows={7}
-            maxLength={20000}
-            placeholder="Paste the notes, textbook extract, or source material to generate questions from (minimum 80 characters)."
-            className="w-full resize-y rounded-xl border border-gray-700 bg-gray-800/80 px-5 py-3.5 text-sm leading-relaxed text-white placeholder:text-gray-500 transition-all hover:border-gray-500 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
-          />
-          <p className="mt-2 text-xs text-gray-500">{studyText.trim().length}/20,000 characters. Questions will be grounded only in this text.</p>
-        </div>
       </div>
 
       {/* CTA */}
@@ -149,7 +164,7 @@ function Dashboard({ onStartTest }) {
 
         <button
           onClick={handleStartTest}
-          disabled={!selectedTopic.trim() || studyText.trim().length < 80}
+          disabled={!selectedTopic.trim()}
           className="mt-8 inline-flex items-center gap-2 rounded-xl bg-violet-600 px-10 py-4 text-base font-semibold text-white shadow-lg shadow-violet-600/25 transition-all hover:bg-violet-500 hover:scale-105 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
         >
           <Zap className="h-5 w-5" />

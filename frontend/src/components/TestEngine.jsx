@@ -21,7 +21,7 @@ const USER_ID = 1;
 
 function TestEngine({ testConfig, onBack }) {
   // ── Guard Clause ──────────────────────────────────────────
-  if (!testConfig || !testConfig.topic || !testConfig.subTopic || !testConfig.studyText) {
+  if (!testConfig || !testConfig.topic || !testConfig.subTopic) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center space-y-6">
         <div className="p-4 bg-red-500/10 rounded-full border border-red-500/20">
@@ -59,6 +59,7 @@ function TestEngine({ testConfig, onBack }) {
   const [progressState, setProgressState] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const [fallbackText, setFallbackText] = useState("");
 
   const startTimeRef = useRef(null);
 
@@ -291,15 +292,25 @@ function TestEngine({ testConfig, onBack }) {
       </div>
 
       {error && !loading && questions.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-red-500/20 bg-red-500/5 py-16 space-y-6">
+        <div className="flex flex-col items-center justify-center rounded-xl border border-red-500/20 bg-red-500/5 py-12 px-6 space-y-6 max-w-3xl mx-auto">
           <div className="p-4 bg-red-500/10 rounded-full border border-red-500/20">
             <AlertTriangle className="h-10 w-10 text-red-400" />
           </div>
-          <div className="text-center max-w-lg px-4">
+          <div className="text-center w-full">
             <h2 className="text-xl font-bold text-white mb-2">Generation Failed</h2>
-            <p className="text-gray-400 text-sm leading-relaxed">
-              {error}
+            <p className="text-gray-400 text-sm leading-relaxed mb-6">
+              Our APIs are currently under heavy load or failed to generate questions for this topic. 
+              Please paste up to 20,000 characters of related text below, and we'll generate questions from it.
             </p>
+            <textarea
+              value={fallbackText}
+              onChange={(e) => setFallbackText(e.target.value)}
+              rows={6}
+              maxLength={20000}
+              placeholder="Paste notes, textbook extract, or source material here..."
+              className="w-full resize-y rounded-xl border border-gray-700 bg-gray-800/80 px-5 py-3.5 text-sm leading-relaxed text-white placeholder:text-gray-500 transition-all hover:border-gray-500 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/40"
+            />
+            <p className="mt-2 text-xs text-gray-500 text-left">{fallbackText.trim().length}/20,000 characters. Minimum 80 characters.</p>
           </div>
           <div className="flex items-center gap-3">
             <button
@@ -310,11 +321,17 @@ function TestEngine({ testConfig, onBack }) {
               Change Topic
             </button>
             <button
-              onClick={() => startGeneration()}
-              className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-600/25 transition hover:bg-violet-500 active:scale-[0.98]"
+              onClick={() => {
+                if (fallbackText.trim().length >= 80) {
+                  testConfig.studyText = fallbackText.trim();
+                  startGeneration();
+                }
+              }}
+              disabled={fallbackText.trim().length < 80}
+              className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-600/25 transition hover:bg-violet-500 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <RotateCcw className="h-4 w-4" />
-              Try Again
+              Retry with Text
             </button>
           </div>
         </div>
