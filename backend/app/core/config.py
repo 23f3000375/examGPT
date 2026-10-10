@@ -16,8 +16,14 @@ class Settings(BaseSettings):
     GROQ_MODEL: str = "openai/gpt-oss-20b"
     OPENROUTER_API_KEY: str | None = None
     OPENROUTER_MODEL: str = "openai/gpt-4o-mini"
+    GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = "gemini-1.5-flash"
+    CEREBRAS_API_KEY: str | None = None
+    CEREBRAS_MODEL: str = "llama3.1-70b"
+    
     APP_URL: str = "http://localhost:5173"
-    LLM_TIMEOUT_SECONDS: float = 45.0
+    LLM_TIMEOUT_SECONDS: float = 30.0
+    CHUNK_SIZE: int = 5
 
     # ── Database ──────────────────────────────────────────────
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/examgpt"

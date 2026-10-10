@@ -22,8 +22,13 @@ from app.schemas.schemas import (
     QuestionRequest,
     WeakestTopicResponse,
 )
-from app.services.ai_factory import GenerationError, generate_validated_questions
+from app.services.ai_factory import GenerationError, generate_validated_questions, generate_validated_questions_stream
 from app.services.pdf_extractor import PdfExtractionError, extract_pdf_text
+import json
+try:
+    from sse_starlette.sse import EventSourceResponse
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +63,43 @@ async def generate_question(
         )
 
     return _persist_questions(db, batch, provider)
+
+
+@api_router.post("/generate-question-stream")
+async def generate_question_stream(
+    body: QuestionRequest,
+    db: Session = Depends(get_db),
+):
+    """Generate questions with SSE streaming for progress updates."""
+    
+    async def event_generator():
+        try:
+            async for event in generate_validated_questions_stream(study_text=body.study_text):
+                if event["status"] == "complete":
+                    # We have the final batch, persist it
+                    from app.schemas.schemas import QuestionBatch
+                    batch = QuestionBatch(**event["batch"])
+                    persisted_output = _persist_questions(db, batch, event["provider"])
+                    event["batch"] = persisted_output
+                
+                yield {
+                    "event": "message",
+                    "data": json.dumps(event)
+                }
+        except GenerationError as exc:
+            logger.error("Question stream failed: %s", exc)
+            yield {
+                "event": "error",
+                "data": json.dumps({"detail": str(exc)})
+            }
+        except Exception as exc:
+            logger.exception("Unexpected error in stream: %s", exc)
+            yield {
+                "event": "error",
+                "data": json.dumps({"detail": "An unexpected error occurred."})
+            }
+            
+    return EventSourceResponse(event_generator())
 
 
 @api_router.post("/generate-question-from-pdf", status_code=status.HTTP_201_CREATED)

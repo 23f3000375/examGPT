@@ -42,6 +42,21 @@ class GeneratedQuestion(StrictModel):
         return self
 
 
+class QuestionChunk(StrictModel):
+    """A chunk of questions from a single LLM call."""
+    questions: list[GeneratedQuestion]
+
+    @model_validator(mode="after")
+    def questions_are_distinct(self) -> "QuestionChunk":
+        ids = [question.id for question in self.questions]
+        prompts = [question.question.casefold().strip() for question in self.questions]
+        if len(set(ids)) != len(self.questions):
+            raise ValueError("question ids must be unique within chunk")
+        if len(set(prompts)) != len(self.questions):
+            raise ValueError("questions must be distinct within chunk")
+        return self
+
+
 class QuestionBatch(StrictModel):
     questions: list[GeneratedQuestion] = Field(min_length=10, max_length=10)
 
@@ -49,9 +64,9 @@ class QuestionBatch(StrictModel):
     def questions_are_distinct(self) -> "QuestionBatch":
         ids = [question.id for question in self.questions]
         prompts = [question.question.casefold().strip() for question in self.questions]
-        if len(set(ids)) != 10:
+        if len(set(ids)) != len(self.questions):
             raise ValueError("question ids must be unique")
-        if len(set(prompts)) != 10:
+        if len(set(prompts)) != len(self.questions):
             raise ValueError("questions must be distinct")
         return self
 

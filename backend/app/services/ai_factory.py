@@ -1,22 +1,20 @@
-"""Reliable, grounded question generation with provider failover.
-
-One schema-constrained LLM request plus local semantic validation is faster and
-more predictable than the former generator/critic loop.
-"""
+"""Reliable, grounded question generation with provider failover and parallel chunks."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, AsyncGenerator
 
 import httpx
 from pydantic import ValidationError
 
 from app.core.config import settings
-from app.schemas.schemas import Difficulty, QuestionBatch
+from app.schemas.schemas import Difficulty, QuestionBatch, QuestionChunk
+from app.services.web_search_fallback import fallback_generate_questions
 
 logger = logging.getLogger(__name__)
 
@@ -34,39 +32,40 @@ class Provider:
     headers: dict[str, str]
 
 
-SYSTEM_PROMPT = """You are ExamGPT's assessment author. Create exam-quality MCQs
+def get_system_prompt(chunk_size: int, chunk_index: int) -> str:
+    # chunk_index 0 = easy and medium. chunk_index 1 = medium and hard, etc.
+    # To keep things simple, we just ask for a mix of difficulties.
+    return f"""You are ExamGPT's assessment author. Create exam-quality MCQs
 using ONLY the STUDY TEXT supplied by the user. Do not use background knowledge,
 make up facts, or ask about material absent from that text.
 
-Return exactly 10 distinct multiple-choice questions: three easy, four medium,
-and three hard. Infer the subject from the study text; do not require or invent
-external topic metadata.
+Return exactly {chunk_size} distinct multiple-choice questions with a mix of easy, medium, and hard difficulty.
+Infer the subject from the study text; do not require or invent external topic metadata.
 Each question must have four plausible options A through D, exactly one correct
 option, a self-contained explanation, and a source_reference copied verbatim from
 the study text. The source_reference must be the smallest direct snippet that proves
 the answer. Do not include markdown, commentary, citations outside source_reference,
 or fields not present in the supplied JSON Schema.
 
-Difficulty guide: easy = direct recall or a single explicit inference; medium =
-connect two or more statements in the text; hard = careful comparison, application,
-or multi-step reasoning strictly justified by the text.
+For this batch, use IDs starting from q{(chunk_index * chunk_size) + 1} to q{(chunk_index + 1) * chunk_size}.
 
-Example shape (values are illustrative only):
-{"questions":[{"id":"q1","type":"multiple_choice","difficulty":"medium","question":"Clear question based purely on context?","options":[{"id":"A","text":"Distractor 1"},{"id":"B","text":"Correct Answer"},{"id":"C","text":"Distractor 2"},{"id":"D","text":"Distractor 3"}],"correct_option_id":"B","explanation":"B follows from the supplied text.","source_reference":"Exact supporting sentence from the study text."}]}"""
+Example shape:
+{{"questions":[{{"id":"q1","type":"multiple_choice","difficulty":"medium","question":"Clear question purely on context?","options":[{{"id":"A","text":"Distractor 1"}},{{"id":"B","text":"Correct Answer"}},{{"id":"C","text":"Distractor 2"}},{{"id":"D","text":"Distractor 3"}}],"correct_option_id":"B","explanation":"B follows from the text.","source_reference":"Exact supporting sentence."}}]}}"""
 
 
 def _normalise(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _grounding_errors(batch: QuestionBatch, study_text: str) -> list[str]:
+def _grounding_errors(chunk: QuestionChunk, study_text: str) -> list[str]:
     """Apply deterministic checks that API-level JSON schema cannot express."""
     context = _normalise(study_text).casefold()
     errors: list[str] = []
-    difficulties = [question.difficulty for question in batch.questions]
-    if difficulties.count("easy") != 3 or difficulties.count("medium") != 4 or difficulties.count("hard") != 3:
-        errors.append("batch must contain three easy, four medium, and three hard questions")
-    for question in batch.questions:
+    
+    if len(chunk.questions) != settings.CHUNK_SIZE:
+        errors.append(f"chunk must contain exactly {settings.CHUNK_SIZE} questions")
+        
+    for question in chunk.questions:
         reference = _normalise(question.source_reference).casefold()
         if reference not in context:
             errors.append(f"{question.id}: source_reference is not a verbatim study-text snippet")
@@ -96,12 +95,16 @@ def _providers() -> list[Provider]:
     providers: list[Provider] = []
     if settings.GROQ_API_KEY:
         providers.append(Provider("groq", "https://api.groq.com/openai/v1/chat/completions", settings.GROQ_API_KEY, settings.GROQ_MODEL, {}))
+    if settings.GEMINI_API_KEY:
+        providers.append(Provider("gemini", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", settings.GEMINI_API_KEY, settings.GEMINI_MODEL, {}))
+    if settings.CEREBRAS_API_KEY:
+        providers.append(Provider("cerebras", "https://api.cerebras.ai/v1/chat/completions", settings.CEREBRAS_API_KEY, settings.CEREBRAS_MODEL, {}))
     if settings.OPENROUTER_API_KEY:
         providers.append(Provider("openrouter", "https://openrouter.ai/api/v1/chat/completions", settings.OPENROUTER_API_KEY, settings.OPENROUTER_MODEL, {"HTTP-Referer": settings.APP_URL, "X-Title": settings.APP_NAME}))
     return providers
 
 
-async def _call_provider(provider: Provider, messages: list[dict[str, str]]) -> QuestionBatch:
+async def _call_provider(provider: Provider, messages: list[dict[str, str]]) -> QuestionChunk:
     payload = {
         "model": provider.model,
         "messages": messages,
@@ -109,7 +112,7 @@ async def _call_provider(provider: Provider, messages: list[dict[str, str]]) -> 
         "stream": False,
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": "examgpt_question_batch", "strict": True, "schema": QuestionBatch.model_json_schema()},
+            "json_schema": {"name": "examgpt_question_chunk", "strict": True, "schema": QuestionChunk.model_json_schema()},
         },
     }
     headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json", **provider.headers}
@@ -122,29 +125,84 @@ async def _call_provider(provider: Provider, messages: list[dict[str, str]]) -> 
     except (KeyError, IndexError, TypeError) as exc:
         raise GenerationError(f"{provider.name} returned an unexpected response envelope") from exc
     try:
-        return QuestionBatch.model_validate_json(_extract_json(content))
+        return QuestionChunk.model_validate_json(_extract_json(content))
     except (ValidationError, json.JSONDecodeError, GenerationError) as exc:
         raise GenerationError(f"{provider.name} response failed schema validation: {exc}") from exc
 
 
-async def generate_validated_questions(*, study_text: str) -> tuple[QuestionBatch, str]:
-    """Return a schema-valid, source-grounded batch, trying each configured provider."""
-    providers = _providers()
-    if not providers:
-        raise GenerationError("No LLM provider is configured. Set GROQ_API_KEY or OPENROUTER_API_KEY.")
-
+async def _race_providers(chunk_index: int, study_text: str, providers: list[Provider]) -> tuple[QuestionChunk, str]:
+    """Fire prompt to all providers simultaneously. Return the first valid chunk."""
+    system_prompt = get_system_prompt(settings.CHUNK_SIZE, chunk_index)
     user_prompt = f"STUDY TEXT START\n{study_text.strip()}\nSTUDY TEXT END"
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}]
-    failures: list[str] = []
-    for provider in providers:
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+    pending = {
+        asyncio.create_task(_call_provider(provider, messages)): provider
+        for provider in providers
+    }
+
+    while pending:
+        done, _ = await asyncio.wait(pending.keys(), return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            provider = pending.pop(task)
+            try:
+                chunk = task.result()
+                errors = _grounding_errors(chunk, study_text)
+                if not errors:
+                    # Cancel remaining tasks
+                    for remaining_task in pending:
+                        remaining_task.cancel()
+                    return chunk, provider.name
+                else:
+                    logger.warning("Provider %s generated chunk with errors: %s", provider.name, "; ".join(errors))
+            except Exception as exc:
+                logger.warning("Provider %s failed: %s", provider.name, exc)
+
+    raise GenerationError(f"All LLM providers failed for chunk {chunk_index}.")
+
+
+async def generate_validated_questions_stream(study_text: str) -> AsyncGenerator[dict[str, Any], None]:
+    """Generate 10 questions in 2 chunks, racing multiple providers. Yields progress dicts."""
+    providers = _providers()
+    
+    total_chunks = 2
+    all_questions = []
+
+    for chunk_index in range(total_chunks):
+        yield {"status": "generating", "chunk": chunk_index + 1, "total_chunks": total_chunks, "provider": "searching..."}
+        
         try:
-            batch = await _call_provider(provider, messages)
-            grounding_errors = _grounding_errors(batch, study_text)
-            if grounding_errors:
-                raise GenerationError("; ".join(grounding_errors))
-            logger.info("Generated grounded batch through %s", provider.name)
-            return batch, provider.name
-        except (httpx.HTTPError, GenerationError) as exc:
-            logger.warning("Question generation via %s failed: %s", provider.name, exc)
-            failures.append(f"{provider.name}: {exc}")
-    raise GenerationError("All LLM providers failed validation. " + " | ".join(failures))
+            if not providers:
+                raise GenerationError("No LLM providers configured.")
+                
+            chunk, provider_name = await _race_providers(chunk_index, study_text, providers)
+            all_questions.extend(chunk.questions)
+            yield {"status": "progress", "chunk": chunk_index + 1, "total_chunks": total_chunks, "provider": provider_name}
+            
+        except GenerationError as exc:
+            logger.warning("Chunk %d failed via LLMs, falling back to web search: %s", chunk_index + 1, exc)
+            yield {"status": "progress", "chunk": chunk_index + 1, "total_chunks": total_chunks, "provider": "web search fallback"}
+            
+            # Fallback
+            chunk = await fallback_generate_questions(study_text, chunk_index, settings.CHUNK_SIZE)
+            all_questions.extend(chunk.questions)
+
+    # Final validation as a full batch (ensures distinct questions etc.)
+    batch = QuestionBatch(questions=all_questions)
+    yield {"status": "complete", "batch": batch.model_dump(), "provider": "mixed"}
+
+
+async def generate_validated_questions(*, study_text: str) -> tuple[QuestionBatch, str]:
+    """Backward compatible synchronous-style wrapper that consumes the stream and returns the final batch."""
+    final_batch = None
+    final_provider = "mixed"
+    
+    async for event in generate_validated_questions_stream(study_text):
+        if event["status"] == "complete":
+            final_batch = QuestionBatch(**event["batch"])
+            final_provider = event["provider"]
+            
+    if not final_batch:
+        raise GenerationError("Generation stream ended without completing.")
+        
+    return final_batch, final_provider

@@ -56,56 +56,88 @@ function TestEngine({ testConfig, onBack }) {
   const [gradingResult, setGradingResult] = useState(null);
   
   const [loading, setLoading] = useState(true);
+  const [progressState, setProgressState] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
   const startTimeRef = useRef(null);
 
+  const startGeneration = async (isCancelled = () => false) => {
+    setLoading(true);
+    setError(null);
+    setProgressState(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/generate-question-stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic: topic,
+          sub_topic: subTopic,
+          difficulty: difficulty,
+          study_text: studyText,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to connect to generation stream.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (!isCancelled()) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop(); 
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const dataStr = line.slice(6);
+            try {
+              const event = JSON.parse(dataStr);
+              if (event.detail) {
+                  throw new Error(event.detail);
+              }
+              if (event.status === "generating" || event.status === "progress") {
+                setProgressState({
+                  chunk: event.chunk,
+                  total_chunks: event.total_chunks,
+                  provider: event.provider,
+                });
+              } else if (event.status === "complete") {
+                setQuestions(event.batch);
+                setCurrentIndex(0);
+                setScore(0);
+                startTimeRef.current = Date.now();
+              }
+            } catch (e) {
+              if (e.message && event?.detail) {
+                 throw e;
+              }
+              // Ignore invalid JSON
+            }
+          }
+        }
+      }
+    } catch (err) {
+      if (!isCancelled()) {
+        console.error("Failed to generate batch:", err);
+        setError(err.message || "Failed to generate questions.");
+      }
+    } finally {
+      if (!isCancelled()) setLoading(false);
+    }
+  };
+
   // ── Generate batch on mount ─────────────────────────────
   useEffect(() => {
     let cancelled = false;
-
-    const generateBatch = async () => {
-      setLoading(true);
-      setError(null);
-
-      try {
-        const { data } = await axios.post(
-          `${API_BASE}/api/generate-question`,
-          {
-            topic: topic,
-            sub_topic: subTopic,
-            difficulty: difficulty,
-            study_text: studyText,
-          }
-        );
-
-        if (!cancelled) {
-          // data should be an array of 10 questions
-          setQuestions(data);
-          setCurrentIndex(0);
-          setScore(0);
-          startTimeRef.current = Date.now();
-        }
-      } catch (err) {
-        if (!cancelled) {
-          console.error("Failed to generate batch:", err);
-          let errMsg = err.response?.data?.detail;
-          if (Array.isArray(errMsg)) {
-            errMsg = errMsg.map((e) => `${e.loc?.at(-1) || 'Field'}: ${e.msg}`).join(", ");
-          } else if (typeof errMsg === "object") {
-            errMsg = JSON.stringify(errMsg);
-          }
-          setError(
-            errMsg || "Failed to generate questions. Is the backend running?"
-          );
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-
-    generateBatch();
+    startGeneration(() => cancelled);
     return () => {
       cancelled = true;
     };
@@ -278,34 +310,7 @@ function TestEngine({ testConfig, onBack }) {
               Change Topic
             </button>
             <button
-              onClick={() => {
-                setError(null);
-                setLoading(true);
-                const retryGenerate = async () => {
-                  try {
-                    const { data } = await axios.post(
-                      `${API_BASE}/api/generate-question`,
-                      { topic, sub_topic: subTopic, difficulty, study_text: studyText }
-                    );
-                    setQuestions(data);
-                    setCurrentIndex(0);
-                    setScore(0);
-                    startTimeRef.current = Date.now();
-                  } catch (err) {
-                    console.error("Retry failed:", err);
-                    let errMsg = err.response?.data?.detail;
-                    if (Array.isArray(errMsg)) {
-                      errMsg = errMsg.map((e) => `${e.loc?.at(-1) || 'Field'}: ${e.msg}`).join(", ");
-                    } else if (typeof errMsg === "object") {
-                      errMsg = JSON.stringify(errMsg);
-                    }
-                    setError(errMsg || "Failed to generate questions. Please try again.");
-                  } finally {
-                    setLoading(false);
-                  }
-                };
-                retryGenerate();
-              }}
+              onClick={() => startGeneration()}
               className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-600/25 transition hover:bg-violet-500 active:scale-[0.98]"
             >
               <RotateCcw className="h-4 w-4" />
@@ -328,10 +333,16 @@ function TestEngine({ testConfig, onBack }) {
             <Sparkles className="absolute -right-1 -top-1 h-5 w-5 animate-pulse text-amber-400" />
           </div>
           <p className="mt-6 text-lg font-medium text-gray-300">
-            Crafting your batch of 10 questions...
+            {progressState 
+              ? `Generating chunk ${progressState.chunk} of ${progressState.total_chunks}...` 
+              : "Connecting to AI Factory..."}
           </p>
           <p className="mt-2 text-sm text-gray-500 text-center max-w-md">
-            This takes a moment as our AI generates exactly 10 distinct, high-quality questions for you.
+            {progressState?.provider ? (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-violet-500/10 text-violet-400 rounded-full border border-violet-500/20 text-xs font-semibold">
+                via {progressState.provider.toUpperCase()}
+              </span>
+            ) : "This takes a moment as our AI generates distinct, high-quality questions for you."}
           </p>
         </div>
       )}
@@ -430,8 +441,19 @@ function TestEngine({ testConfig, onBack }) {
                     {gradingResult.explanation}
                   </p>
                   {currentQuestion.source_reference && (
-                    <p className="mt-4 border-t border-blue-400/20 pt-4 text-sm italic leading-relaxed text-blue-200/80">
-                      Source: “{currentQuestion.source_reference}”
+                    <p className="mt-4 border-t border-blue-400/20 pt-4 text-sm italic leading-relaxed text-blue-200/80 flex flex-col gap-1">
+                      {currentQuestion.source_reference.startsWith("Web:") ? (
+                        <>
+                          <span className="flex items-center gap-1.5 font-semibold text-blue-300">
+                            <BookOpen className="h-4 w-4" /> Sourced from Web
+                          </span>
+                          <a href={currentQuestion.source_reference.slice(5)} target="_blank" rel="noreferrer" className="underline hover:text-blue-100">
+                            {currentQuestion.source_reference.slice(5)}
+                          </a>
+                        </>
+                      ) : (
+                        <span>Source: “{currentQuestion.source_reference}”</span>
+                      )}
                     </p>
                   )}
                 </div>
