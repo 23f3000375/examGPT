@@ -31,3 +31,14 @@ and, when needed, study text supplied by the learner.
 
 Gemini defaults to `gemini-2.5-flash`, and Groq defaults to
 `openai/gpt-oss-20b`; override either model in `.env` if needed.
+
+## Render and Vercel deployment
+
+- In Render's backend service environment, set `GEMINI_API_KEY` and
+  `GROQ_API_KEY`, then redeploy the backend.
+- In Vercel's frontend project settings, set `VITE_API_URL` to the Render
+  backend's public URL (for example, `https://your-service.onrender.com`) and
+  redeploy the frontend. This value is embedded when Vite builds; without it,
+  production must not fall back to a visitor's `localhost`.
+- Set the backend's `APP_URL` to the deployed frontend origin if using a
+  custom domain. Vercel preview and production domains are also allowed by CORS.

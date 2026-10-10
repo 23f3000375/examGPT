@@ -22,10 +22,12 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173", 
+        "http://localhost:5173",
         "http://localhost:3000",
-        "https://exam-gpt.vercel.app"  # <-- Added your live Vercel URL here
+        settings.APP_URL,
+        "https://exam-gpt.vercel.app",
     ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

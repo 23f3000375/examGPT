@@ -16,7 +16,10 @@ import {
   ArrowRight,
 } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_BASE = (
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.DEV ? "http://localhost:8000" : "")
+).replace(/\/+$/, "");
 const USER_ID = 1;
 
 function TestEngine({ testConfig, onBack }) {
@@ -45,6 +48,12 @@ function TestEngine({ testConfig, onBack }) {
     setProgressState(null);
 
     try {
+      if (!API_BASE) {
+        throw new Error(
+          "Backend URL is not configured. Set VITE_API_URL in Vercel to your Render service URL, then redeploy the frontend."
+        );
+      }
+
       const response = await fetch(`${API_BASE}/api/generate-question-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -57,7 +66,16 @@ function TestEngine({ testConfig, onBack }) {
       });
 
       if (!response.ok) {
-        throw new Error("Failed to connect to generation stream.");
+        const responseText = await response.text();
+        let detail = responseText;
+        try {
+          detail = JSON.parse(responseText).detail || responseText;
+        } catch {
+          // Keep the response body for non-JSON proxy and server errors.
+        }
+        throw new Error(
+          `Backend returned ${response.status}: ${detail.slice(0, 300)}`
+        );
       }
       if (!response.body) {
         throw new Error("The generation stream returned no response body.");
